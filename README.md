@@ -25,7 +25,9 @@ ghcr.io/leolabtec/wg-easy-source-amd64:source-<upstream-short-sha>-amd64
 
 Each release also contains a compressed Docker image tarball for manual `docker load` use.
 
-For GHCR pushes, either grant this repository write access to the `wg-easy-source-amd64` package, or add a repository secret named `GHCR_TOKEN` with `write:packages` and `read:packages` scopes. The built-in `GITHUB_TOKEN` is used when `GHCR_TOKEN` is not set.
+For GHCR pushes, grant this repository write access to the `wg-easy-source-amd64` package. The workflow uses the built-in `GITHUB_TOKEN`.
+
+GitHub package visibility is separate from repository visibility. To allow unauthenticated server pulls, open the package settings page and change the package visibility to public.
 
 ## Deploy
 

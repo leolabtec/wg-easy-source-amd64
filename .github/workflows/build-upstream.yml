@@ -150,7 +150,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN || github.token }}
+          password: ${{ github.token }}
 
       - name: Build and push image
         if: steps.plan.outputs.should_build == 'true'
