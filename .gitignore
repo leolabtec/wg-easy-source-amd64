@@ -1,0 +1,7 @@
+.env
+*.tar
+*.db
+*.conf
+*.key
+*.pem
+*.log
