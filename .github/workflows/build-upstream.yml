@@ -1,0 +1,283 @@
+name: Build upstream wg-easy amd64 image
+
+on:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Optional wg-easy branch, tag, or commit SHA to build"
+        required: false
+        type: string
+      force_build:
+        description: "Build even when the tracked upstream commit is unchanged"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: upstream-wg-easy-amd64
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: wg-easy/wg-easy
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/wg-easy-source-amd64
+  TRACK_FILE: .github/upstream-wg-easy.sha
+
+jobs:
+  build:
+    name: Check upstream and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Resolve upstream commit
+        id: upstream
+        shell: bash
+        env:
+          INPUT_UPSTREAM_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.upstream_ref || '' }}
+        run: |
+          set -euo pipefail
+
+          repo_url="https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          if [ -n "${INPUT_UPSTREAM_REF}" ]; then
+            tmp_dir="$(mktemp -d)"
+            git -C "${tmp_dir}" init -q
+            git -C "${tmp_dir}" remote add origin "${repo_url}"
+            git -C "${tmp_dir}" fetch --depth=1 origin "${INPUT_UPSTREAM_REF}"
+            sha="$(git -C "${tmp_dir}" rev-parse FETCH_HEAD)"
+            ref="${INPUT_UPSTREAM_REF}"
+            is_default_head=false
+          else
+            sha="$(git ls-remote "${repo_url}" HEAD | awk '{print $1}')"
+            ref="HEAD"
+            is_default_head=true
+          fi
+
+          if ! [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unable to resolve upstream commit for ${ref}" >&2
+            exit 1
+          fi
+
+          tracked=""
+          if [ -f "${TRACK_FILE}" ]; then
+            tracked="$(tr -d '[:space:]' < "${TRACK_FILE}")"
+          fi
+
+          short="${sha:0:7}"
+          tag="source-${short}-amd64"
+
+          {
+            echo "sha=${sha}"
+            echo "short=${short}"
+            echo "ref=${ref}"
+            echo "is_default_head=${is_default_head}"
+            echo "tracked=${tracked}"
+            echo "tag=${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Plan build
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_build || false }}
+          IS_DEFAULT_HEAD: ${{ steps.upstream.outputs.is_default_head }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+          TRACKED_SHA: ${{ steps.upstream.outputs.tracked }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          release_exists=false
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          should_build=true
+          reason="upstream changed"
+
+          if [ "${INPUT_FORCE_BUILD}" != "true" ] && [ "${UPSTREAM_SHA}" = "${TRACKED_SHA}" ]; then
+            should_build=false
+            reason="tracked upstream commit is unchanged"
+          elif [ "${INPUT_FORCE_BUILD}" != "true" ] && [ "${release_exists}" = "true" ]; then
+            should_build=false
+            reason="release ${RELEASE_TAG} already exists"
+          elif [ "${INPUT_FORCE_BUILD}" = "true" ]; then
+            reason="manual force build requested"
+          fi
+
+          should_update_state=false
+          if [ "${IS_DEFAULT_HEAD}" = "true" ] && [ "${UPSTREAM_SHA}" != "${TRACKED_SHA}" ]; then
+            should_update_state=true
+          fi
+
+          {
+            echo "release_exists=${release_exists}"
+            echo "should_build=${should_build}"
+            echo "should_update_state=${should_update_state}"
+            echo "reason=${reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Build decision: ${should_build} (${reason})"
+
+      - name: Checkout upstream source
+        if: steps.plan.outputs.should_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ steps.upstream.outputs.sha }}
+          path: upstream
+
+      - name: Set up Docker Buildx
+        if: steps.plan.outputs.should_build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.plan.outputs.should_build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
+
+      - name: Build and push image
+        if: steps.plan.outputs.should_build == 'true'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: upstream
+          file: upstream/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest-amd64
+            ${{ env.IMAGE_NAME }}:${{ steps.upstream.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPOSITORY }}
+            org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
+            org.opencontainers.image.description=Automated amd64 build of upstream wg-easy
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export image tarball
+        if: steps.plan.outputs.should_build == 'true'
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.upstream.outputs.tag }}
+          SHORT_SHA: ${{ steps.upstream.outputs.short }}
+        run: |
+          set -euo pipefail
+
+          image_ref="${IMAGE_NAME}:${IMAGE_TAG}"
+          archive="/tmp/wg-easy-source-${SHORT_SHA}-amd64.tar.gz"
+
+          docker pull "${image_ref}"
+          docker tag "${image_ref}" "${IMAGE_NAME}:latest-amd64"
+          docker save "${image_ref}" "${IMAGE_NAME}:latest-amd64" | gzip -9 > "${archive}"
+          sha256sum "${archive}" > "${archive}.sha256"
+
+          {
+            echo "IMAGE_ARCHIVE=${archive}"
+            echo "IMAGE_ARCHIVE_SHA256=${archive}.sha256"
+          } >> "${GITHUB_ENV}"
+
+      - name: Create or update release
+        if: steps.plan.outputs.should_build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+          SHORT_SHA: ${{ steps.upstream.outputs.short }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          notes="/tmp/release-notes-${SHORT_SHA}.md"
+          cat > "${notes}" <<NOTES
+          Automated linux/amd64 build from upstream wg-easy.
+
+          Upstream source:
+          - Repository: https://github.com/${UPSTREAM_REPOSITORY}
+          - Commit: https://github.com/${UPSTREAM_REPOSITORY}/commit/${UPSTREAM_SHA}
+
+          Container image:
+          - ${IMAGE_NAME}:${RELEASE_TAG}
+          - ${IMAGE_NAME}:latest-amd64
+          - Digest: ${DIGEST}
+
+          Release asset:
+          - wg-easy-source-${SHORT_SHA}-amd64.tar.gz
+          - Load manually with: docker load < wg-easy-source-${SHORT_SHA}-amd64.tar.gz
+
+          Security reminder:
+          - Expose only 51820/udp publicly.
+          - Keep 51821/tcp bound to LAN, VPN, or SSH tunnel only.
+          NOTES
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${IMAGE_ARCHIVE}" "${IMAGE_ARCHIVE_SHA256}" --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --title "wg-easy source ${SHORT_SHA} amd64" \
+              --notes-file "${notes}" \
+              --latest
+          else
+            gh release create "${RELEASE_TAG}" "${IMAGE_ARCHIVE}" "${IMAGE_ARCHIVE_SHA256}" \
+              --title "wg-easy source ${SHORT_SHA} amd64" \
+              --notes-file "${notes}" \
+              --latest
+          fi
+
+      - name: Update tracked upstream commit
+        if: success() && steps.plan.outputs.should_update_state == 'true'
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+          SHORT_SHA: ${{ steps.upstream.outputs.short }}
+        run: |
+          set -euo pipefail
+
+          echo "${UPSTREAM_SHA}" > "${TRACK_FILE}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${TRACK_FILE}"
+
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git commit -m "Track wg-easy ${SHORT_SHA} [skip ci]"
+          branch="${GITHUB_REF_NAME:-main}"
+          git fetch origin "${branch}"
+          git rebase "origin/${branch}"
+          git push origin "HEAD:${branch}"
+
+      - name: Summary
+        shell: bash
+        env:
+          SHOULD_BUILD: ${{ steps.plan.outputs.should_build }}
+          REASON: ${{ steps.plan.outputs.reason }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          {
+            echo "### wg-easy upstream check"
+            echo
+            echo "- Upstream commit: ${UPSTREAM_SHA}"
+            echo "- Release tag: ${RELEASE_TAG}"
+            echo "- Built image: ${SHOULD_BUILD}"
+            echo "- Reason: ${REASON}"
+          } >> "${GITHUB_STEP_SUMMARY}"

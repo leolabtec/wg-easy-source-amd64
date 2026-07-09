@@ -1,6 +1,6 @@
 services:
   wg-easy:
-    image: ghcr.io/leolabtec/wg-easy-source-amd64:source-78b2838-amd64
+    image: ${WG_EASY_IMAGE:-ghcr.io/leolabtec/wg-easy-source-amd64:latest-amd64}
     container_name: wg-easy
     restart: unless-stopped
 
