@@ -106,14 +106,16 @@ jobs:
           should_build=true
           reason="upstream changed"
 
-          if [ "${INPUT_FORCE_BUILD}" != "true" ] && [ "${UPSTREAM_SHA}" = "${TRACKED_SHA}" ]; then
+          if [ "${INPUT_FORCE_BUILD}" = "true" ]; then
+            reason="manual force build requested"
+          elif [ "${UPSTREAM_SHA}" = "${TRACKED_SHA}" ] && [ "${release_exists}" = "true" ]; then
             should_build=false
-            reason="tracked upstream commit is unchanged"
-          elif [ "${INPUT_FORCE_BUILD}" != "true" ] && [ "${release_exists}" = "true" ]; then
+            reason="tracked upstream commit is unchanged and release already exists"
+          elif [ "${release_exists}" = "true" ]; then
             should_build=false
             reason="release ${RELEASE_TAG} already exists"
-          elif [ "${INPUT_FORCE_BUILD}" = "true" ]; then
-            reason="manual force build requested"
+          elif [ "${UPSTREAM_SHA}" = "${TRACKED_SHA}" ]; then
+            reason="release missing for tracked upstream commit"
           fi
 
           should_update_state=false
