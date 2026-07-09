@@ -1,7 +1,14 @@
 .env
+.env.*
+!.env.example
 *.tar
+*.tar.gz
 *.db
+*.sqlite
+*.sqlite3
 *.conf
 *.key
 *.pem
+*.crt
+*.p12
 *.log
